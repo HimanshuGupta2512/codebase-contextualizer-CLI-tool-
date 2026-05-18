@@ -1,0 +1,5 @@
+node_modules/
+.contextualizer/
+.DS_Store
+*.log
+dist/
