@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Local semantic code search CLI using Tree-sitter, worker threads, local embeddings, and SQLite vector storage.",
   "main": "index.js",
+  "scripts": {
+    "test": "node tests/cosine-similarity.test.js && node tests/map-limit.test.js && node tests/cache.test.js"
+  },
   "bin": {
     "codebase-contextualizer": "./index.js"
   },
