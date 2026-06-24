@@ -10,6 +10,7 @@ const parsers = {
   ".js": parseJavaScript,
   ".jsx": parseJavaScript,
   ".mjs": parseJavaScript,
+  ".py": parsePython,
 };
 
 function getParser(filePath) {
@@ -88,6 +89,53 @@ function parseJavaScript({ code, relativePath }) {
   return chunks;
 }
 
+function parsePython({ code, relativePath }) {
+  const chunks = [];
+  const lines = code.split('\n');
+  const defPattern = /^(\s*)(def|class)\s+([A-Za-z_][A-Za-z0-9_]*)\s*[(:]/;
+
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const match = defPattern.exec(line);
+
+    if (match) {
+      const indent = match[1].length;
+      const keyword = match[2];
+      const name = match[3];
+      const startLine = i;
+
+      // Collect body lines that are more indented than the def/class line
+      let j = i + 1;
+      while (j < lines.length) {
+        const nextLine = lines[j];
+        const isBlank = nextLine.trim() === '';
+        const lineIndent = nextLine.match(/^(\s*)/)[1].length;
+        if (!isBlank && lineIndent <= indent) break;
+        j++;
+      }
+
+      const chunkCode = lines.slice(startLine, j).join('\n');
+
+      chunks.push({
+        name,
+        type: keyword === 'def' ? 'function_definition' : 'class_definition',
+        code: chunkCode,
+        startLine: startLine + 1,
+        endLine: j,
+        relativePath,
+      });
+
+      // Move to next line, NOT to j — so inner defs are also matched
+      i++;
+    } else {
+      i++;
+    }
+  }
+
+  return chunks;
+}
+
 function parseSourceFile({ filePath, relativePath, code }) {
   const parse = getParser(filePath);
 
@@ -111,6 +159,7 @@ function parseSourceFile({ filePath, relativePath, code }) {
 module.exports = {
   getParser,
   parseJavaScript,
+  parsePython,
   parseSourceFile,
   parsers,
 };
