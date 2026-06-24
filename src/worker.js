@@ -1,36 +1,8 @@
 const fs = require("fs/promises");
 const { parentPort } = require("worker_threads");
-const { pipeline } = require("@xenova/transformers");
+const { getEmbedder, toFloat32Array } = require("./embeddings");
 const { getContentSkipReason } = require("./file-filter");
 const { getParser, parseSourceFile } = require("./parser");
-
-const MODEL_ID = "Xenova/all-MiniLM-L6-v2";
-
-let embedderPromise;
-
-function getEmbedder() {
-  if (!embedderPromise) {
-    embedderPromise = pipeline("feature-extraction", MODEL_ID);
-  }
-
-  return embedderPromise;
-}
-
-function toFloat32Array(value) {
-  if (value instanceof Float32Array) {
-    return new Float32Array(value);
-  }
-
-  if (ArrayBuffer.isView(value)) {
-    return Float32Array.from(value);
-  }
-
-  if (Array.isArray(value)) {
-    return Float32Array.from(value);
-  }
-
-  throw new Error("Embedding output could not be converted to Float32Array");
-}
 
 async function embedChunk(embedder, chunk) {
   const output = await embedder(chunk.semanticText, {
