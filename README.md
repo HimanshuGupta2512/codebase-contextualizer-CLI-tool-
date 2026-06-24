@@ -1,141 +1,113 @@
-# Codebase Contextualizer CLI
+# Codebase Contextualizer
 
-![CLI Demo](demo.gif)
+A command-line tool for semantic search over local codebases. It parses source files into AST-level chunks, generates vector embeddings using a locally-run ONNX model, stores them in SQLite, and retrieves the most semantically relevant chunks for a given natural language query — entirely offline, with no external API dependencies.
 
-A high-performance local semantic search engine for codebases. The CLI walks a directory, extracts semantic code chunks with Tree-sitter, embeds those chunks locally with `@xenova/transformers`, persists vectors in SQLite, and answers natural-language queries without external APIs.
+---
 
-The project is intentionally systems-oriented: it keeps I/O asynchronous, pushes CPU-bound parsing and embedding off the main V8 thread, transfers vector memory without cloning, and stores embeddings in an embedded database that can be queried instantly from the command line.
+## Performance
 
-## System Architecture
+Benchmarked against the [Express.js](https://github.com/expressjs/express) repository (141 files, 229 chunks), running 1,000 search iterations:
 
-The CLI is split into two execution planes.
+| Metric | Result |
+|--------|--------|
+| Average latency | 0.21 ms |
+| p50 | 0.20 ms |
+| p90 | 0.27 ms |
+| p95 | 0.27 ms |
 
-**Main thread**
+---
 
-- Parses commands with `commander`.
-- Walks directories asynchronously while respecting `.gitignore`.
-- Hashes source files with streamed SHA-256.
-- Uses the cache at `.contextualizer/cache.json` to process only new or modified files.
-- Owns all SQLite writes through `better-sqlite3`.
+## Project Structure
 
-**Worker pool**
-
-- Uses native Node.js `worker_threads`.
-- Defaults to `Math.min(4, Math.max(1, os.cpus().length - 1))` workers.
-- Each worker initializes its own Tree-sitter parser and singleton local embedding pipeline.
-- Workers read files, extract JavaScript functions/classes/methods, build semantic payloads, and return chunk metadata plus vector tensors.
-
-This design avoids the primary Node.js performance trap: running CPU-heavy AST parsing and ONNX inference on the main V8 event loop. The main thread remains responsible for orchestration and storage, while worker threads absorb the expensive compute path.
-
-## Memory Management
-
-Embeddings are represented as `Float32Array` instances end to end. Workers convert model output into compact typed arrays before returning results to the main process.
-
-The worker response uses zero-copy transfer:
-
-```js
-parentPort.postMessage(payload, transferList);
+```text
+.
+├── index.js                  # CLI entry point (commander)
+├── scripts/
+│   └── benchmark.js          # Search latency benchmark (p50/p90/p95)
+├── tests/
+│   ├── cosine-similarity.test.js
+│   ├── map-limit.test.js
+│   └── cache.test.js
+└── src/
+    ├── indexer.js            # Pipeline orchestration
+    ├── walker.js             # Directory traversal with .gitignore support
+    ├── file-hash.js          # SHA-256 change detection
+    ├── parser.js             # AST chunker (Tree-sitter for JS/JSX, regex for Python)
+    ├── embeddings.js         # Shared ONNX embedding utilities
+    ├── worker.js             # Worker thread: parse → embed → transfer
+    ├── worker-pool.js        # Custom worker_threads pool with crash recovery
+    ├── database.js           # SQLite vector storage
+    ├── search.js             # Query embedding + cosine similarity ranking
+    ├── cache.js              # Incremental index state (skip unchanged files)
+    ├── concurrency.js        # Custom async mapLimit
+    ├── file-filter.js        # Binary/minified file exclusion
+    ├── paths.js              # Cross-platform path normalization
+    ├── abort.js              # AbortError utilities
+    └── shutdown.js           # Global cleanup registry
 ```
 
-Each vector's underlying `ArrayBuffer` is included in `transferList`, so ownership moves from the worker to the main thread instead of cloning megabytes of embedding data. This prevents avoidable garbage collection pressure and keeps large-codebase indexing predictable.
+---
 
-## Storage Engine
+## Design Notes
 
-Vectors are persisted in `.contextualizer/vector.db` with `better-sqlite3`.
+**Worker thread pool**
+The embedding pipeline runs entirely off the main thread. A custom `worker_threads` pool (not a library) manages worker lifecycle: tasks queue when all workers are busy, crashed workers auto-respawn, and the pool drains cleanly on SIGINT/SIGTERM.
 
-The database uses:
+**Zero-copy tensor transfer**
+Each worker passes its embedding result back to the main thread via `postMessage(payload, transferList)`, transferring ownership of the underlying `ArrayBuffer` rather than cloning it. This avoids redundant memory allocation across the thread boundary for 384-dimensional float vectors.
 
-- `PRAGMA journal_mode = WAL` for concurrent-friendly write behavior.
-- A `files` table keyed by path and hash.
-- A `chunks` table containing symbol metadata, line ranges, source snippets, and vector BLOBs.
-- Bulk transactional writes with `db.transaction()` so chunk inserts are committed as a batch.
-- Binary vector storage via `Buffer.from(embedding.buffer)`.
+**Incremental indexing**
+Files are SHA-256 hashed on each run. Only new or modified files enter the parse-embed-store pipeline; unchanged files are skipped. The hash state is persisted to `.contextualizer/cache.json` via atomic tmp-file rename to prevent corruption on interrupted runs.
 
-At search time, BLOBs are reconstructed as typed arrays:
+**End-to-end abort propagation**
+`AbortController` is threaded through the walker, the hash concurrency layer, the worker pool, and the SQLite write path. A SIGINT at any point in the pipeline triggers a coordinated teardown — no leaked file handles or orphaned threads.
 
-```js
-new Float32Array(
-  row.embedding.buffer,
-  row.embedding.byteOffset,
-  row.embedding.byteLength / Float32Array.BYTES_PER_ELEMENT
-);
-```
+**Multi-language parsing**
+JavaScript and JSX files are parsed via Tree-sitter AST grammars. Python files use an indentation-aware regex chunker that extracts function and class definition blocks without native binary dependencies, keeping the tool portable across environments.
 
-Cosine similarity is computed over typed arrays and the top matches are ranked in memory.
+**Local inference**
+Embeddings are produced by Xenova/all-MiniLM-L6-v2 via @xenova/transformers (ONNX Runtime). The model runs fully on-device — no network calls are made after the initial model download.
 
-## Usage
+---
 
-Install dependencies:
+## Installation
 
 ```bash
+git clone https://github.com/HimanshuGupta2512/codebase-contextualizer-CLI-tool-
+cd codebase-contextualizer-CLI-tool-
 npm install
 ```
 
-Index a codebase:
+---
+
+## Usage
 
 ```bash
-node index.js index .
+# Index a codebase
+node index.js index <path>
+
+# Search with a natural language query
+node index.js search <path> "<query>" [--top <n>]
+
+# Check index status
+node index.js status <path>
+
+# Run search latency benchmark
+node scripts/benchmark.js <path> "<query>"
+
+# Run unit tests
+npm test
 ```
 
-Index with a fixed worker count:
+---
 
-```bash
-node index.js index . --workers 4
-```
+## Tech Stack
 
-Check cache drift without writing updates:
-
-```bash
-node index.js status .
-```
-
-Search indexed code:
-
-```bash
-node index.js search "hash files with sha256" .
-```
-
-Return JSON output:
-
-```bash
-node index.js search "worker pool queue" . --json
-```
-
-## Benchmark
-
-Run the search latency benchmark against the current directory:
-
-```bash
-node scripts/benchmark.js
-```
-
-Run against another indexed target:
-
-```bash
-node scripts/benchmark.js ./sample-code "authentication logic"
-```
-
-The benchmark opens `.contextualizer/vector.db`, embeds a dummy query once, runs 1,000 cosine-similarity scans, and reports average, p50, p90, and p95 latency in milliseconds.
-
-Performance: Achieves sub-0.0763ms p95 vector retrieval latency over 1,000 local queries.
-
-## Current Language Support
-
-The parser dispatch layer currently routes JavaScript-family files:
-
-- `.js`
-- `.jsx`
-- `.mjs`
-- `.cjs`
-
-Unsupported source extensions are skipped gracefully. The architecture is ready for additional Tree-sitter grammars through the parser router.
-
-## Engineering Notes
-
-- No external embedding APIs are used.
-- Unchanged files are not re-parsed or re-embedded.
-- Indexing skips source files over 1 MB, common binary extensions, and obvious minified bundles before they reach the parser.
-- Ctrl+C aborts active indexing, terminates worker threads, and closes open SQLite handles.
-- SQLite writes happen on the main thread after worker results return.
-- Search loads the local embedding model as a singleton for query vectors.
-- The system favors explicit typed-array and BLOB boundaries over generic JavaScript arrays.
+| Layer | Technology |
+|-------|------------|
+| Runtime | Node.js, worker_threads |
+| Parsing | Tree-sitter (JS/JSX), regex chunker (Python) |
+| Embeddings | @xenova/transformers, Xenova/all-MiniLM-L6-v2 |
+| Storage | SQLite (better-sqlite3) |
+| Search | Cosine similarity over Float32Array vectors |
+| CLI | Commander.js |
